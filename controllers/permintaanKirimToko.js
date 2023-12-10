@@ -1,6 +1,9 @@
 const axios = require('axios');
 const { checkCurrentAuthorization } = require('../helpers/globalFunction');
-const { db_accounting_and_factory } = require('../config/masterDatabase');
+const { 
+  db_accounting_and_factory,
+  db_accounting_and_factory_connnection
+ } = require('../config/masterDatabase');
 const { PENJUALAN } = require('../helpers/constant');
 
 const permintaanKirimToko = async (req, res) => {
@@ -29,8 +32,8 @@ const permintaanKirimToko = async (req, res) => {
         "cabang": "holis"
       },
       {
-        "nama_kain": "COMBED 24S",
-        "jenis_warna": "SEAFOAM GREEN 2",
+        "nama_kain": "COMBED 16S",
+        "jenis_warna": "MAROON",
         "tanggal": "2023-11-06T00:00:00.000Z",
         "total_permintaan_import": 1,
         "user_id": 0,
@@ -38,131 +41,91 @@ const permintaanKirimToko = async (req, res) => {
       }
     ];
     
-    resultRequestData.forEach(async (item, key) => {
-      console.log("item", item)
-      
+    const conn = await db_accounting_and_factory_connnection;
+     
+    for (const item of resultRequestData) {
       let query = `
         INSERT INTO 
         f_tbl_permintaan_kirim_toko 
         (nama_kain, jenis_warna, tanggal, total_permintaan_import, tanggal_input, user_id, cabang) 
         VALUES ('` + item.nama_kain + `', '` + item.jenis_warna + `', '` + item.tanggal + `', ` + item.total_permintaan_import + `, NOW(), ` + user_id + `, '` + branch + `')
         ON DUPLICATE KEY UPDATE total_permintaan_import = ` + item.total_permintaan_import;
-      await db_accounting_and_factory.query(query, function (err, result){
-        if (err) throw err;
+      await conn.execute(query);
+
+      permintaanKirimQty = parseInt(item.total_permintaan_import);
+
+      if (item.total_permintaan_import > 0) {
+        let queryStokPabrik = `
+          SELECT s.no_kp no_data, s.no_po_toko, s.jenis_kain nama_kain_pabrik, s.nama_kain_toko, s.nama_warna nama_warna_pabrik, s.nama_warna_toko,
+          pm.tanggal_terima, s.tanggal_jam tgl_update_stok, s.jumlah_stok_siap_kirim,
+          IFNULL((SELECT SUM(a2.jml_roll) FROM tbl_sj_matang a1 JOIN tbl_sj_matang_det a2 ON (a1.id_sj=a2.id_sj)
+          WHERE a1.status=2 AND a2.no_kp=s.no_kp AND a1.tanggal>DATE(NOW())), 0) jml_kirim,
+          pm.lebar, pm.gramasi, pm.keterangan,
+          IFNULL((SELECT SUM(quantity) FROM f_relasi_no_data_permintaan_kirim_toko a WHERE a.no_data = s.no_kp), 0) AS quantity_pemasangan,
+          IFNULL(s.jumlah_stok_siap_kirim - IF((SELECT quantity_pemasangan) >= (SELECT jml_kirim), (SELECT quantity_pemasangan), (SELECT jml_kirim)), 0) AS quantity_sisa
+          FROM tbl_stok_kain_matang_siap_kirim s
+          JOIN tbl_penerimaan_kainmatang pm ON (pm.no_sj_matang=s.no_kp)
+          WHERE s.jenis_po='STOK' AND s.status_data='DATA'
+          AND s.jumlah_stok_siap_kirim>0 AND s.nama_kain_toko = '` + item.nama_kain + `' AND s.nama_warna_toko = '` + item.jenis_warna + `'
+          ORDER BY pm.tanggal_terima ASC`;
+        const [rows, fields] = await conn.execute(queryStokPabrik);
+        let resultStokPabrik = rows;
+        
+        if (resultStokPabrik.length > 0) {            
+          for (const listData of resultStokPabrik) {                  
+            let queryPermintaanKirimToko = `SELECT * FROM f_tbl_permintaan_kirim_toko WHERE tanggal LIKE '%` + tanggal + `%' AND cabang = '` + branch + `' AND nama_kain = '` + listData.nama_kain_toko + `'`;
+            const [rows, fields] = await conn.execute(queryPermintaanKirimToko);
+            let selectedDataId = rows[0].id;
+            if (permintaanKirimQty > 0) {
+              let quantitySisa = parseInt(listData.quantity_sisa);
+              if (quantitySisa > 0) {
+                if (quantitySisa <= permintaanKirimQty) {
+                  listPemasangan.push({
+                    id_f_tbl_permintaan_kirim_toko: selectedDataId,
+                    no_data: listData.no_data,
+                    permintaan_kirim: quantitySisa
+                  });
+                  
+                  permintaanKirimQty = permintaanKirimQty - quantitySisa;
+                }        
+                if (permintaanKirimQty > 0) {
+                  if (quantitySisa > permintaanKirimQty) {
+                    listPemasangan.push({
+                      id_f_tbl_permintaan_kirim_toko: selectedDataId,
+                      no_data: listData.no_data,
+                      permintaan_kirim: permintaanKirimQty
+                    });
+    
+                    permintaanKirimQty = 0;
+                  }    
+                }
+              }    
+            }
+          };
+        }
+      }
+    };
+
+    if (listPemasangan.length > 0) {
+      listPemasangan.map(async (item, key) => {
+        let querySavePermintaanKirimToko = `
+          INSERT INTO 
+          f_relasi_no_data_permintaan_kirim_toko
+          (id_f_tbl_permintaan_kirim_toko, no_data, quantity, tanggal_input, user_id) 
+          VALUES (` + item.id_f_tbl_permintaan_kirim_toko + `, '` + item.no_data + `', ` + item.permintaan_kirim + `, ` + ` NOW() ` + `, ` + user_id + `)
+          ON DUPLICATE KEY UPDATE quantity = ` + item.permintaan_kirim;
+        await conn.execute(querySavePermintaanKirimToko);
       });
-
-      let queryPermintaanKirimToko = `SELECT * FROM f_tbl_permintaan_kirim_toko WHERE tanggal LIKE '%` + tanggal + `%' AND cabang = '` + branch + `'`;
-      let processPermintaanKirimToko = await db_accounting_and_factory.query(queryPermintaanKirimToko, function (err, result){
-        if (err) throw err;
-      })
-      // let resultPermintaanKirimToko = processPermintaanKirimToko[0]
-      permintaanKirimQty = item.total_permintaan_import;
-      console.log("permintaanKirimQty", permintaanKirimQty)
-    });
-
-
-    // let promises = resultRequestData.map(async (item, key) => {
-    //   let query = `
-    //     INSERT INTO 
-    //     f_tbl_permintaan_kirim_toko 
-    //     (nama_kain, jenis_warna, tanggal, total_permintaan_import, tanggal_input, user_id, cabang) 
-    //     VALUES ('` + item.nama_kain + `', '` + item.jenis_warna + `', '` + item.tanggal + `', ` + item.total_permintaan_import + `, NOW(), ` + user_id + `, '` + branch + `')
-    //     ON DUPLICATE KEY UPDATE total_permintaan_import = ` + item.total_permintaan_import;
-    //   let process = await db_accounting_and_factory.query(query, function (err, result){
-    //     if (err) throw err;
-    //   });
-    //   await process[0]
-
-    //   let queryPermintaanKirimToko = `SELECT * FROM f_tbl_permintaan_kirim_toko WHERE tanggal LIKE '%` + tanggal + `%' AND cabang = '` + branch + `'`;
-    //   let processPermintaanKirimToko = await db_accounting_and_factory.query(queryPermintaanKirimToko, function (err, result){
-    //     if (err) throw err;
-    //   })
-    //   let resultPermintaanKirimToko = processPermintaanKirimToko[0]
-    //   permintaanKirimQty = item.total_permintaan_import;
-    //   console.log("permintaanKirimQty", permintaanKirimQty)
-
-    //   if (item.total_permintaan_import > 0) {
-    //     let queryStokPabrik = `
-    //       SELECT s.no_kp no_data, s.no_po_toko, s.jenis_kain nama_kain_pabrik, s.nama_kain_toko, s.nama_warna nama_warna_pabrik, s.nama_warna_toko,
-    //       pm.tanggal_terima, s.tanggal_jam tgl_update_stok, s.jumlah_stok_siap_kirim,
-    //       IFNULL((SELECT SUM(a2.jml_roll) FROM tbl_sj_matang a1 JOIN tbl_sj_matang_det a2 ON (a1.id_sj=a2.id_sj)
-    //       WHERE a1.status=2 AND a2.no_kp=s.no_kp AND a1.tanggal>DATE(NOW())), 0) jml_kirim,
-    //       pm.lebar, pm.gramasi, pm.keterangan,
-    //       IFNULL((SELECT SUM(quantity) FROM f_relasi_no_data_permintaan_kirim_toko a WHERE a.no_data = s.no_kp), 0) AS quantity_pemasangan,
-    //       IFNULL(s.jumlah_stok_siap_kirim - IF((SELECT quantity_pemasangan) >= (SELECT jml_kirim), (SELECT quantity_pemasangan), (SELECT jml_kirim)), 0) AS quantity_sisa
-    //       FROM tbl_stok_kain_matang_siap_kirim s
-    //       JOIN tbl_penerimaan_kainmatang pm ON (pm.no_sj_matang=s.no_kp)
-    //       WHERE s.jenis_po='STOK' AND s.status_data='DATA'
-    //       AND s.jumlah_stok_siap_kirim>0 AND s.nama_kain_toko = '` + item.nama_kain + `' AND s.nama_warna_toko = '` + item.jenis_warna + `'
-    //       ORDER BY pm.tanggal_terima ASC`;
-    //     let processStokPabrik = await db_accounting_and_factory.query(queryStokPabrik, function (err, result){
-    //       if (err) throw err;
-    //     });
-    //     let resultStokPabrik = processStokPabrik[0];
-    //     if (resultStokPabrik.length > 0) {  
-    //       // variable permintaan kirim
-    //       let stokPabrikPromise = resultStokPabrik.map((listData, index) => {
-    //         console.log("listData", listData)
-    //         const selectedData = resultPermintaanKirimToko.find((element) => element.nama_kain === listData.nama_kain_toko);
-
-    //         if (permintaanKirimQty > 0) {
-    //           // variable qty sisa
-    //           let quantitySisa = listData.quantity_sisa;
-    //           console.log("quantitySisa", quantitySisa)
-    //           console.log("permintaanKirimQty", permintaanKirimQty)
-    //           if (quantitySisa <= permintaanKirimQty) {
-    //             listPemasangan.push({
-    //               id_f_tbl_permintaan_kirim_toko: selectedData.id,
-    //               no_data: listData.no_data,
-    //               permintaan_kirim: quantitySisa
-    //             });
-                
-    //             permintaanKirimQty = permintaanKirimQty - quantitySisa;
-    //           }                
-    //           if (quantitySisa > permintaanKirimQty) {
-    //             listPemasangan.push({
-    //               id_f_tbl_permintaan_kirim_toko: selectedData.id,
-    //               no_data: listData.no_data,
-    //               permintaan_kirim: permintaanKirimQty
-    //             });
-
-    //             permintaanKirimQty = 0
-    //           }
-    //         }
-    //       });                
-    //       await Promise.all(stokPabrikPromise)
-    //     }
-    //   }
-    // });  
-    // await Promise.all(promises)
-
-    // if (listPemasangan.length > 0) {
-    //   listPemasangan.map(async (item, key) => {
-    //     let querySavePermintaanKirimToko = `
-    //       INSERT INTO 
-    //       f_relasi_no_data_permintaan_kirim_toko
-    //       (id_f_tbl_permintaan_kirim_toko, no_data, quantity, tanggal_input, user_id) 
-    //       VALUES (` + item.id_f_tbl_permintaan_kirim_toko + `, '` + item.no_data + `', ` + item.permintaan_kirim + `, ` + ` NOW() ` + `, ` + user_id + `)
-    //       ON DUPLICATE KEY UPDATE quantity = ` + item.permintaan_kirim;
-    //     let resultSavePermintaanKirimToko = await db_accounting_and_factory.query(querySavePermintaanKirimToko, function (err, result){
-    //       if (err) throw err;
-    //     });
-    //     resultSavePermintaanKirimToko[0];
-    //   });
-    // }
-
+    }
     let queryResult = `SELECT * FROM f_tbl_permintaan_kirim_toko WHERE tanggal LIKE '%` + tanggal + `%' AND cabang = '` + branch + `'`;
-    let processResult = await db_accounting_and_factory.query(queryResult, function (err, result){
-      if (err) throw err;
-    })
-    let dataResult = processResult[0]
+    const [rows, fields] = await conn.execute(queryResult);
     
     return res.status(200).send({
       meta: {
         message: "Success",
         code: res.statusCode,
         success: true,
-      }, data: dataResult
+      }, data: rows
     })
   } catch (error) {
     return res.status(400).send({
@@ -184,7 +147,21 @@ const getPemasanganPermintaanKirimTokoById = async (req, res) => {
   try {
     if (Number.isNaN(id_f_tbl_permintaan_kirim_toko)) throw new TypeError('Id harus berupa angka.');
 
-    query = `SELECT * FROM f_relasi_no_data_permintaan_kirim_toko WHERE id_f_tbl_permintaan_kirim_toko = ` + id_f_tbl_permintaan_kirim_toko + ` AND status = 0`;
+    query = `
+      SELECT pt.id, pt.id_f_tbl_permintaan_kirim_toko, pt.user_id, pt.status, pt.quantity, s.no_kp no_data, s.no_po_toko, s.jenis_kain nama_kain_pabrik, s.nama_kain_toko, s.nama_warna nama_warna_pabrik, s.nama_warna_toko,
+      pm.tanggal_terima, s.tanggal_jam tgl_update_stok, s.jumlah_stok_siap_kirim,
+      IFNULL((SELECT SUM(a2.jml_roll) FROM tbl_sj_matang a1 JOIN tbl_sj_matang_det a2 ON (a1.id_sj=a2.id_sj)
+      WHERE a1.status=2 AND a2.no_kp=s.no_kp AND a1.tanggal>DATE(NOW())), 0) jml_kirim,
+      pm.lebar, pm.gramasi, pm.keterangan,
+      IFNULL((SELECT SUM(quantity) FROM f_relasi_no_data_permintaan_kirim_toko a WHERE a.no_data = s.no_kp), 0) AS quantity_pemasangan,
+      IFNULL(s.jumlah_stok_siap_kirim - IF((SELECT quantity_pemasangan) >= (SELECT jml_kirim), (SELECT quantity_pemasangan), (SELECT jml_kirim)), 0) AS quantity_sisa
+      FROM tbl_stok_kain_matang_siap_kirim s
+      JOIN tbl_penerimaan_kainmatang pm ON (pm.no_sj_matang=s.no_kp)
+      JOIN f_relasi_no_data_permintaan_kirim_toko pt ON (pt.no_data=s.no_kp)
+      WHERE s.jenis_po='STOK' AND s.status_data='DATA'
+      AND s.jumlah_stok_siap_kirim>0 AND pt.id_f_tbl_permintaan_kirim_toko = ` + id_f_tbl_permintaan_kirim_toko + ` AND pt.status = 0
+      ORDER BY pm.tanggal_terima ASC`;
+    // query = `SELECT * FROM f_relasi_no_data_permintaan_kirim_toko WHERE id_f_tbl_permintaan_kirim_toko = ` + id_f_tbl_permintaan_kirim_toko + ` AND status = 0`;
     process = await db_accounting_and_factory.query(query, function (err, result){
       if (err) throw err;
     });

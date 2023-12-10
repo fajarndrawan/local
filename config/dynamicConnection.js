@@ -1,4 +1,4 @@
-var mysql = require('mysql2/promise')
+var mysql = require('mysql2')
 var Sequelize = require('sequelize')
 const { serverDb } = require("../models/serverDb")
 const dialectOptions = require("./dialectOptions")
